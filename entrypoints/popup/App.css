@@ -1,0 +1,256 @@
+#root {
+  width: 100%;
+}
+
+.shell {
+  display: grid;
+  gap: 14px;
+}
+
+.hero-card,
+.panel {
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(15, 23, 42, 0.94), rgba(2, 6, 23, 0.96));
+  box-shadow: 0 18px 50px rgba(2, 6, 23, 0.45);
+}
+
+.hero-card {
+  padding: 20px;
+  position: relative;
+  overflow: hidden;
+}
+
+.hero-card::after {
+  content: "";
+  position: absolute;
+  inset: auto -20px -45px auto;
+  width: 160px;
+  height: 160px;
+  border-radius: 999px;
+  background: radial-gradient(circle, rgba(248, 113, 113, 0.32), transparent 70%);
+}
+
+.hero-copy h1,
+.panel-header h2,
+.target-card,
+.record-button,
+.secondary-button {
+  font-family: Georgia, "Times New Roman", serif;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #fca5a5;
+}
+
+.hero-copy h1 {
+  margin: 0;
+  font-size: 28px;
+  line-height: 1.05;
+  color: #f8fafc;
+}
+
+.subcopy {
+  margin: 10px 0 0;
+  max-width: 28ch;
+  color: #cbd5e1;
+  font-size: 13px;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 18px;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 7px 11px;
+  font-size: 11px;
+  text-transform: capitalize;
+  letter-spacing: 0.06em;
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.status-idle,
+.status-stopping {
+  color: #e2e8f0;
+}
+
+.status-starting,
+.status-recording {
+  color: #fecaca;
+}
+
+.status-error {
+  color: #fca5a5;
+}
+
+.timer {
+  font-size: 12px;
+  color: #cbd5e1;
+}
+
+.panel {
+  padding: 16px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 20px;
+  color: #f8fafc;
+}
+
+.panel-header span,
+.recording-meta span,
+.toggle-row small,
+.empty-state {
+  color: #94a3b8;
+  font-size: 12px;
+}
+
+.target-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.target-card {
+  min-height: 56px;
+  border-radius: 18px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(15, 23, 42, 0.72);
+  color: #e2e8f0;
+}
+
+.target-card.active {
+  border-color: rgba(248, 113, 113, 0.5);
+  background: linear-gradient(180deg, rgba(127, 29, 29, 0.9), rgba(69, 10, 10, 0.9));
+}
+
+.toggle-list {
+  display: grid;
+  gap: 10px;
+}
+
+.toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.toggle-row span {
+  display: grid;
+  gap: 2px;
+}
+
+.toggle-row strong,
+.recording-meta strong {
+  color: #f8fafc;
+  font-size: 13px;
+}
+
+.toggle-row input {
+  width: 18px;
+  height: 18px;
+  accent-color: #ef4444;
+}
+
+.record-button,
+.secondary-button {
+  width: 100%;
+  min-height: 52px;
+  margin-top: 14px;
+  border-radius: 18px;
+  font-size: 16px;
+  transition: transform 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+
+.record-button:hover,
+.secondary-button:hover {
+  transform: translateY(-1px);
+}
+
+.record-button.start {
+  background: linear-gradient(180deg, #ef4444, #b91c1c);
+  color: #fff;
+}
+
+.record-button.stop {
+  background: linear-gradient(180deg, #334155, #0f172a);
+  color: #fff;
+  border-color: rgba(248, 113, 113, 0.35);
+}
+
+.error-banner {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-radius: 14px;
+  color: #fecaca;
+  background: rgba(127, 29, 29, 0.38);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  font-size: 12px;
+}
+
+.recording-panel {
+  gap: 12px;
+}
+
+.recording-meta {
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(15, 23, 42, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.recording-meta div {
+  display: grid;
+  gap: 4px;
+}
+
+.action-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.secondary-button {
+  margin-top: 0;
+  min-height: 46px;
+  background: rgba(15, 23, 42, 0.78);
+  color: #f8fafc;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+}
+
+.empty-state {
+  margin: 0;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+  transform: none;
+}
