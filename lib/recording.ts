@@ -1,4 +1,10 @@
-export type RecordingTarget = "tab" | "window" | "screen";
+export type RecordingQuality = "standard" | "high" | "ultra" | "custom";
+
+export type PipCorner =
+  | "top-left"
+  | "top-right"
+  | "bottom-left"
+  | "bottom-right";
 
 export type RecordingStatus =
   | "idle"
@@ -8,10 +14,20 @@ export type RecordingStatus =
   | "error";
 
 export type StartRecordingOptions = {
-  target: RecordingTarget;
   micEnabled: boolean;
   cameraEnabled: boolean;
-  systemAudioEnabled: boolean;
+  tabAudioEnabled: boolean;
+  quality: RecordingQuality;
+  customFrameRate?: number;
+  customVideoBitrate?: number;
+  pipCorner: PipCorner;
+};
+
+export type PreparedRecordingOptions = StartRecordingOptions & {
+  streamId: string;
+  frameRate: number;
+  videoBitsPerSecond: number;
+  audioBitsPerSecond: number;
 };
 
 export type StoredRecording = {
@@ -36,6 +52,7 @@ export type RecordingState = {
   activeTabId: number | null;
   options: StartRecordingOptions | null;
   lastError: string | null;
+  lastWarning: string | null;
   lastRecording: StoredRecording | null;
 };
 
@@ -45,6 +62,7 @@ export const initialRecordingState: RecordingState = {
   activeTabId: null,
   options: null,
   lastError: null,
+  lastWarning: null,
   lastRecording: null,
 };
 
@@ -54,13 +72,12 @@ export type RuntimeMessage =
   | { type: "STOP_RECORDING" }
   | {
       type: "OFFSCREEN_START_RECORDING";
-      payload: StartRecordingOptions & { streamId: string };
+      payload: PreparedRecordingOptions;
     }
   | { type: "OFFSCREEN_STOP_RECORDING" }
   | { type: "OFFSCREEN_RECORDING_COMPLETE"; payload: OffscreenRecordingResult }
   | { type: "OFFSCREEN_RECORDING_ERROR"; payload: { message: string } }
-  | { type: "SHOW_CAMERA_PREVIEW" }
-  | { type: "HIDE_CAMERA_PREVIEW" }
+  | { type: "OFFSCREEN_RECORDING_WARNING"; payload: { message: string } }
   | { type: "RECORDING_STATE_CHANGED"; payload: RecordingState };
 
 export type RuntimeResponse<T> =
@@ -84,4 +101,41 @@ export function formatFileSize(size: number) {
   }
 
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export const QUALITY_PRESETS: Record<
+  Exclude<RecordingQuality, "custom">,
+  {
+    label: string;
+    description: string;
+    frameRate: number;
+    videoBitsPerSecond: number;
+    audioBitsPerSecond: number;
+  }
+> = {
+  standard: {
+    label: "Standard",
+    description: "24 fps · 4 Mbps",
+    frameRate: 24,
+    videoBitsPerSecond: 4_000_000,
+    audioBitsPerSecond: 128_000,
+  },
+  high: {
+    label: "High",
+    description: "30 fps · 8 Mbps",
+    frameRate: 30,
+    videoBitsPerSecond: 8_000_000,
+    audioBitsPerSecond: 160_000,
+  },
+  ultra: {
+    label: "Ultra",
+    description: "30 fps · 12 Mbps",
+    frameRate: 30,
+    videoBitsPerSecond: 12_000_000,
+    audioBitsPerSecond: 192_000,
+  },
+};
+
+export function formatBitrate(bitsPerSecond: number) {
+  return `${(bitsPerSecond / 1_000_000).toFixed(0)} Mbps`;
 }

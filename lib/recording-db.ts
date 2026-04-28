@@ -53,3 +53,19 @@ export async function getRecordingAsset(id: string) {
   database.close();
   return asset;
 }
+
+export async function getAllRecordingAssets() {
+  const database = await openDatabase();
+
+  const assets = await new Promise<RecordingAsset[]>((resolve, reject) => {
+    const transaction = database.transaction(STORE_NAME, "readonly");
+    const store = transaction.objectStore(STORE_NAME);
+    const request = store.getAll();
+
+    request.onsuccess = () => resolve(request.result as RecordingAsset[]);
+    request.onerror = () => reject(request.error ?? new Error("Failed to load recordings."));
+  });
+
+  database.close();
+  return assets;
+}

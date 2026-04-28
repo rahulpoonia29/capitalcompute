@@ -1,30 +1,41 @@
-import { useEffect, useEffectEvent, useMemo, useState } from "react";
+import { useEffect, useCallback, useMemo, useState } from "react";
 import {
   formatDuration,
   formatFileSize,
+  formatBitrate,
   initialRecordingState,
   isRuntimeResponse,
+  QUALITY_PRESETS,
+  type PipCorner,
+  type RecordingQuality,
   type RecordingState,
-  type RecordingTarget,
   type RuntimeMessage,
   type RuntimeResponse,
   type StartRecordingOptions,
 } from "../../lib/recording";
-import "./App.css";
 
-const TARGET_OPTIONS: Array<{ label: string; value: RecordingTarget }> = [
-  { label: "Tab", value: "tab" },
-  { label: "Window", value: "window" },
-  { label: "Screen", value: "screen" },
+const QUALITY_OPTIONS = [
+  ...Object.entries(QUALITY_PRESETS),
+  ["custom", { label: "Custom", description: "Set framerate and bitrate manually" }]
+] as Array<[RecordingQuality, { label: string; description: string }]>;
+
+const CORNER_OPTIONS: Array<{ value: PipCorner; label: string }> = [
+  { value: "top-left", label: "Top left" },
+  { value: "top-right", label: "Top right" },
+  { value: "bottom-left", label: "Bottom left" },
+  { value: "bottom-right", label: "Bottom right" },
 ];
 
 function App() {
   const [recordingState, setRecordingState] = useState<RecordingState>(initialRecordingState);
   const [form, setForm] = useState<StartRecordingOptions>({
-    target: "tab",
     micEnabled: true,
     cameraEnabled: true,
-    systemAudioEnabled: true,
+    tabAudioEnabled: true,
+    quality: "high",
+    pipCorner: "bottom-right",
+    customFrameRate: 30,
+    customVideoBitrate: 8000000,
   });
   const [requestError, setRequestError] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
@@ -33,18 +44,24 @@ function App() {
     if (!recordingState.startedAt) {
       return "00:00";
     }
-
     return formatDuration(now - recordingState.startedAt);
   }, [now, recordingState.startedAt]);
 
-  const syncState = useEffectEvent((state: RecordingState) => {
+  const syncState = useCallback((state: RecordingState) => {
     setRecordingState(state);
     setRequestError(null);
 
-    if (state.options) {
-      setForm(state.options);
+    if (state.status === "recording" || state.status === "starting" || state.status === "stopping") {
+      if (state.options) {
+        setForm(f => ({ ...f, ...state.options }));
+      }
+      return;
     }
-  });
+
+    if (state.options) {
+      setForm(f => ({ ...f, ...state.options }));
+    }
+  }, []);
 
   useEffect(() => {
     void loadState();
@@ -55,14 +72,19 @@ function App() {
       }
     };
 
-    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
     browser.runtime.onMessage.addListener(handleMessage);
 
     return () => {
-      window.clearInterval(intervalId);
       browser.runtime.onMessage.removeListener(handleMessage);
     };
   }, [syncState]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, []);
 
   async function loadState() {
     const response = await browser.runtime.sendMessage({ type: "GET_RECORDING_STATE" } satisfies RuntimeMessage);
@@ -73,18 +95,45 @@ function App() {
     }
   }
 
+  async function requestPermissions(mic: boolean, camera: boolean) {
+    if (!mic && !camera) return true;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: mic,
+        video: camera,
+      });
+      stream.getTracks().forEach(track => track.stop());
+      return true;
+    } catch (err) {
+      setRequestError("Camera/Mic access is required. Please grant permissions in the setup tab that just opened.");
+      void browser.tabs.create({ url: chrome.runtime.getURL("recording.html?setup=true") });
+      return false;
+    }
+  }
+
   async function startRecording() {
     setRequestError(null);
 
+    const hasPermissions = await requestPermissions(form.micEnabled, form.cameraEnabled);
+    if (!hasPermissions) {
+      return;
+    }
+
+    const payload = { ...form };
+    if (payload.quality !== "custom") {
+      delete payload.customFrameRate;
+      delete payload.customVideoBitrate;
+    }
+
     const response = await browser.runtime.sendMessage({
       type: "START_RECORDING",
-      payload: form,
+      payload,
     } satisfies RuntimeMessage);
 
     if (isRuntimeResponse<RecordingState>(response) && !response.ok) {
       setRequestError(response.error);
       if (response.state) {
-        setRecordingState(response.state);
+        syncState(response.state);
       }
     }
   }
@@ -99,161 +148,244 @@ function App() {
     if (isRuntimeResponse<RecordingState>(response) && !response.ok) {
       setRequestError(response.error);
       if (response.state) {
-        setRecordingState(response.state);
+        syncState(response.state);
       }
     }
   }
 
   const isBusy = recordingState.status === "starting" || recordingState.status === "stopping";
   const isRecording = recordingState.status === "recording";
+  const activeQuality = form.quality === "custom" 
+    ? { videoBitsPerSecond: form.customVideoBitrate || 8000000 } 
+    : QUALITY_PRESETS[form.quality as keyof typeof QUALITY_PRESETS] || { videoBitsPerSecond: 8000000 };
 
   return (
-    <main className="shell">
-      <section className="hero-card">
-        <div className="hero-copy">
-          <p className="eyebrow">Capital Compute Recorder</p>
-          <h1>Capture updates without leaving the tab.</h1>
-          <p className="subcopy">
-            Screen, camera, mic, and instant playback links in one lightweight flow.
-          </p>
-        </div>
+    <main className="min-h-full bg-white p-4 text-slate-900">
+      <div className="space-y-6">
+        <header className="flex items-center justify-between pb-4 border-b border-slate-100">
+          <div>
+            <h1 className="text-lg font-semibold text-slate-900">Tab Recorder</h1>
+            <p className="text-sm text-slate-500">Record current tab</p>
+          </div>
+          <div className="rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-700">
+            {isRecording ? recordingDuration : recordingState.status}
+          </div>
+        </header>
 
-        <div className="status-row">
-          <span className={`status-pill status-${recordingState.status}`}>
-            {recordingState.status}
-          </span>
-          <span className="timer">{isRecording ? recordingDuration : "Ready"}</span>
-        </div>
-      </section>
+        <section className="space-y-4">
+          <div className="grid gap-3">
+            <label className="grid gap-1.5 text-sm">
+              <span className="font-medium text-slate-800">Recording quality</span>
+              <select
+                value={form.quality}
+                onChange={(event) =>
+                  setForm((current) => ({
+                    ...current,
+                    quality: event.target.value as RecordingQuality,
+                  }))
+                }
+                disabled={isBusy || isRecording}
+                className="h-10 w-full rounded border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-400"
+              >
+                {QUALITY_OPTIONS.map(([value, preset]) => (
+                  <option key={value} value={value}>
+                    {preset.label} · {preset.description}
+                  </option>
+                ))}
+              </select>
+            </label>
 
-      <section className="panel">
-        <div className="panel-header">
-          <h2>Record</h2>
-          <span>Choose what to capture</span>
-        </div>
+            {form.quality === "custom" && (
+              <div className="grid grid-cols-2 gap-3">
+                <label className="grid gap-1.5 text-sm">
+                  <span className="font-medium text-slate-800">Framerate (fps)</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={60}
+                    value={form.customFrameRate || 30}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      setForm(f => ({ ...f, customFrameRate: val }));
+                    }}
+                    disabled={isBusy || isRecording}
+                    className="h-10 w-full rounded border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-400"
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm">
+                  <span className="font-medium text-slate-800">Bitrate (Mbps)</span>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={form.customVideoBitrate ? form.customVideoBitrate / 1000000 : 8}
+                    onChange={(e) => {
+                      const val = Number(e.target.value) * 1000000;
+                      setForm(f => ({ ...f, customVideoBitrate: val }));
+                    }}
+                    disabled={isBusy || isRecording}
+                    className="h-10 w-full rounded border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-400"
+                  />
+                </label>
+              </div>
+            )}
+            
+            {form.quality !== "custom" && (
+               <div className="text-xs text-slate-500">
+                  Bitrate: <span className="font-medium">{formatBitrate(activeQuality.videoBitsPerSecond)}</span>
+               </div>
+            )}
 
-        <div className="target-grid" role="radiogroup" aria-label="Recording target">
-          {TARGET_OPTIONS.map((option) => (
-            <button
-              key={option.value}
-              type="button"
-              className={`target-card ${form.target === option.value ? "active" : ""}`}
-              onClick={() => setForm((current) => ({ ...current, target: option.value }))}
+            <label className="grid gap-1.5 text-sm pt-2">
+              <span className="font-medium text-slate-800">Camera position</span>
+              <select
+                value={form.pipCorner}
+                onChange={(event) =>
+                  setForm((current) => ({
+                    ...current,
+                    pipCorner: event.target.value as PipCorner,
+                  }))
+                }
+                disabled={isBusy || isRecording || !form.cameraEnabled}
+                className="h-10 w-full rounded border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none focus:border-slate-400 focus:ring-1 focus:ring-slate-400 disabled:bg-slate-50 disabled:text-slate-400"
+              >
+                {CORNER_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="space-y-2 pt-2">
+            <ToggleRow
+              label="Tab audio"
+              checked={form.tabAudioEnabled}
               disabled={isBusy || isRecording}
-            >
-              <span>{option.label}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="toggle-list">
-          <label className="toggle-row">
-            <span>
-              <strong>Microphone</strong>
-              <small>Layer narration into the final video</small>
-            </span>
-            <input
-              type="checkbox"
+              onChange={(checked) =>
+                setForm((current) => ({ ...current, tabAudioEnabled: checked }))
+              }
+            />
+            <ToggleRow
+              label="Microphone"
               checked={form.micEnabled}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, micEnabled: event.target.checked }))
-              }
               disabled={isBusy || isRecording}
+              onChange={(checked) =>
+                setForm((current) => ({ ...current, micEnabled: checked }))
+              }
             />
-          </label>
-
-          <label className="toggle-row">
-            <span>
-              <strong>Camera overlay</strong>
-              <small>Composite a PiP camera feed into the recording</small>
-            </span>
-            <input
-              type="checkbox"
+            <ToggleRow
+              label="Camera PiP"
               checked={form.cameraEnabled}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, cameraEnabled: event.target.checked }))
-              }
               disabled={isBusy || isRecording}
-            />
-          </label>
-
-          <label className="toggle-row">
-            <span>
-              <strong>System audio</strong>
-              <small>Include tab or desktop audio when available</small>
-            </span>
-            <input
-              type="checkbox"
-              checked={form.systemAudioEnabled}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, systemAudioEnabled: event.target.checked }))
+              onChange={(checked) =>
+                setForm((current) => ({ ...current, cameraEnabled: checked }))
               }
-              disabled={isBusy || isRecording}
             />
-          </label>
-        </div>
+          </div>
 
-        <button
-          type="button"
-          className={`record-button ${isRecording ? "stop" : "start"}`}
-          onClick={isRecording ? stopRecording : startRecording}
-          disabled={isBusy}
-        >
-          {recordingState.status === "starting"
-            ? "Preparing capture..."
-            : recordingState.status === "stopping"
-              ? "Finalizing recording..."
-              : isRecording
-                ? "Stop recording"
-                : "Start recording"}
-        </button>
+          <button
+            type="button"
+            onClick={isRecording ? stopRecording : startRecording}
+            disabled={isBusy}
+            className="mt-4 inline-flex h-10 w-full items-center justify-center rounded bg-slate-900 text-sm font-medium text-white transition hover:bg-slate-800 disabled:opacity-50"
+          >
+            {recordingState.status === "starting"
+              ? "Preparing..."
+              : recordingState.status === "stopping"
+                ? "Finalizing..."
+                : isRecording
+                  ? "Stop recording"
+                  : "Start recording"}
+          </button>
 
-        {(requestError || recordingState.lastError) && (
-          <p className="error-banner">{requestError ?? recordingState.lastError}</p>
-        )}
-      </section>
+          {(requestError || recordingState.lastError) && (
+            <p className="mt-2 text-xs text-red-600">
+              {requestError ?? recordingState.lastError}
+            </p>
+          )}
 
-      <section className="panel recording-panel">
-        <div className="panel-header">
-          <h2>Latest capture</h2>
-          <span>{recordingState.lastRecording ? "Ready to open or share" : "Nothing recorded yet"}</span>
-        </div>
+          {recordingState.lastWarning && !requestError && !recordingState.lastError && (
+            <p className="mt-2 text-xs text-amber-600">
+              {recordingState.lastWarning}
+            </p>
+          )}
+        </section>
 
-        {recordingState.lastRecording ? (
-          <>
-            <div className="recording-meta">
-              <div>
-                <strong>{recordingState.lastRecording.filename}</strong>
-                <span>
-                  {formatDuration(recordingState.lastRecording.durationMs)} · {formatFileSize(recordingState.lastRecording.size)}
-                </span>
+        <section className="pt-4 border-t border-slate-100">
+          <div className="flex items-center justify-between">
+            <h2 className="text-sm font-medium text-slate-900">Latest recording</h2>
+          </div>
+
+          {recordingState.lastRecording ? (
+            <div className="mt-3 space-y-2">
+              <div className="truncate text-sm text-slate-600">
+                {recordingState.lastRecording.filename}
+              </div>
+              <div className="text-xs text-slate-500">
+                {formatDuration(recordingState.lastRecording.durationMs)} · {formatFileSize(recordingState.lastRecording.size)}
+              </div>
+              <div className="flex gap-2 pt-1">
+                <button
+                  type="button"
+                  className="inline-flex h-8 px-3 items-center justify-center rounded border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  onClick={() => browser.tabs.create({ url: recordingState.lastRecording!.shareUrl })}
+                >
+                  Open
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-8 px-3 items-center justify-center rounded border border-slate-200 bg-white text-xs font-medium text-slate-700 hover:bg-slate-50"
+                  onClick={() => browser.tabs.create({ url: chrome.runtime.getURL("recording.html") })}
+                >
+                  Library
+                </button>
               </div>
             </div>
-
-            <div className="action-row">
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => browser.tabs.create({ url: recordingState.lastRecording!.shareUrl })}
-              >
-                Open playback
-              </button>
-              <button
-                type="button"
-                className="secondary-button"
-                onClick={() => navigator.clipboard.writeText(recordingState.lastRecording!.shareUrl)}
-              >
-                Copy link
-              </button>
-            </div>
-          </>
-        ) : (
-          <p className="empty-state">
-            Your latest recording will appear here with a shareable playback link.
-          </p>
-        )}
-      </section>
+          ) : (
+            <p className="mt-2 text-sm text-slate-500">No recent recordings.</p>
+          )}
+          
+          {!recordingState.lastRecording && (
+             <div className="mt-4">
+                <button
+                  type="button"
+                  className="text-xs font-medium text-slate-600 underline hover:text-slate-900"
+                  onClick={() => browser.tabs.create({ url: chrome.runtime.getURL("recording.html") })}
+                >
+                  View Library
+                </button>
+             </div>
+          )}
+        </section>
+      </div>
     </main>
+  );
+}
+
+function ToggleRow({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-4 py-2">
+      <span className="block text-sm text-slate-800">{label}</span>
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-4 w-4 rounded border-slate-300 text-slate-900 focus:ring-slate-400"
+      />
+    </label>
   );
 }
 

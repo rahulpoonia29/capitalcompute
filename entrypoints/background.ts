@@ -1,10 +1,12 @@
 import {
   initialRecordingState,
+  QUALITY_PRESETS,
   type OffscreenRecordingResult,
+  type PreparedRecordingOptions,
   type RecordingState,
+  type StartRecordingOptions,
   type RuntimeMessage,
   type RuntimeResponse,
-  type StartRecordingOptions,
   type StoredRecording,
 } from "../lib/recording";
 
@@ -17,6 +19,18 @@ export default defineBackground(() => {
   void restoreRecordingState();
 
   browser.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendResponse) => {
+    const shouldHandle =
+      message.type === "GET_RECORDING_STATE" ||
+      message.type === "START_RECORDING" ||
+      message.type === "STOP_RECORDING" ||
+      message.type === "OFFSCREEN_RECORDING_COMPLETE" ||
+      message.type === "OFFSCREEN_RECORDING_ERROR" ||
+      message.type === "OFFSCREEN_RECORDING_WARNING";
+
+    if (!shouldHandle) {
+      return false;
+    }
+
     void handleMessage(message)
       .then((response) => sendResponse(response))
       .catch(async (error) => {
@@ -24,8 +38,12 @@ export default defineBackground(() => {
           error instanceof Error ? error.message : "Unexpected recording error.";
 
         await updateRecordingState({
+          activeTabId: null,
+          options: null,
           status: "error",
+          startedAt: null,
           lastError: messageText,
+          lastWarning: null,
         });
 
         sendResponse({ ok: false, error: messageText, state: recordingState });
@@ -47,8 +65,10 @@ async function handleMessage(message: RuntimeMessage): Promise<RuntimeResponse<u
       return { ok: true, data: await finalizeRecording(message.payload) };
     case "OFFSCREEN_RECORDING_ERROR":
       return { ok: true, data: await failRecording(message.payload.message) };
+    case "OFFSCREEN_RECORDING_WARNING":
+      return { ok: true, data: await setRecordingWarning(message.payload.message) };
     default:
-      return { ok: false, error: "Unsupported message." };
+      throw new Error("Unsupported message.");
   }
 }
 
@@ -92,29 +112,19 @@ async function startRecording(options: StartRecordingOptions) {
     activeTabId: activeTab.id,
     options,
     lastError: null,
+    lastWarning: null,
   });
 
   await ensureOffscreenDocument();
 
-  const streamId =
-    options.target === "tab"
-      ? await browser.tabCapture.getMediaStreamId({ targetTabId: activeTab.id })
-      : await chooseDesktopStream(activeTab, options);
-
+  const preparedOptions = await prepareRecordingOptions(activeTab, options);
   const response = await sendRuntimeMessage<void>({
     type: "OFFSCREEN_START_RECORDING",
-    payload: {
-      ...options,
-      streamId,
-    },
+    payload: preparedOptions,
   });
 
   if (!response.ok) {
     throw new Error(response.error);
-  }
-
-  if (options.cameraEnabled) {
-    await browser.tabs.sendMessage(activeTab.id, { type: "SHOW_CAMERA_PREVIEW" }).catch(() => undefined);
   }
 
   await updateRecordingState({
@@ -123,6 +133,58 @@ async function startRecording(options: StartRecordingOptions) {
   });
 
   return recordingState;
+}
+
+async function prepareRecordingOptions(
+  activeTab: chrome.tabs.Tab,
+  options: StartRecordingOptions,
+): Promise<PreparedRecordingOptions> {
+  if (!activeTab.id) {
+    throw new Error("No active tab is available for recording.");
+  }
+
+  const frameRate =
+    options.quality === "custom" && options.customFrameRate
+      ? options.customFrameRate
+      : options.quality === "custom"
+        ? 30
+        : QUALITY_PRESETS[options.quality as keyof typeof QUALITY_PRESETS].frameRate;
+
+  const videoBitsPerSecond =
+    options.quality === "custom" && options.customVideoBitrate
+      ? options.customVideoBitrate
+      : options.quality === "custom"
+        ? 8_000_000
+        : QUALITY_PRESETS[options.quality as keyof typeof QUALITY_PRESETS].videoBitsPerSecond;
+
+  const audioBitsPerSecond =
+    options.quality === "custom"
+      ? 160_000
+      : QUALITY_PRESETS[options.quality as keyof typeof QUALITY_PRESETS].audioBitsPerSecond;
+
+  const streamId = await new Promise<string>((resolve, reject) => {
+    chrome.tabCapture.getMediaStreamId({ targetTabId: activeTab.id }, (value) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(`Tab capture failed: ${chrome.runtime.lastError.message}`));
+        return;
+      }
+
+      if (!value) {
+        reject(new Error("Tab capture did not return a stream id."));
+        return;
+      }
+
+      resolve(value);
+    });
+  });
+
+  return {
+    ...options,
+    streamId,
+    frameRate,
+    videoBitsPerSecond,
+    audioBitsPerSecond,
+  };
 }
 
 async function stopRecording() {
@@ -134,12 +196,6 @@ async function stopRecording() {
     status: "stopping",
     lastError: null,
   });
-
-  if (recordingState.activeTabId) {
-    await browser.tabs
-      .sendMessage(recordingState.activeTabId, { type: "HIDE_CAMERA_PREVIEW" })
-      .catch(() => undefined);
-  }
 
   const response = await sendRuntimeMessage<void>({ type: "OFFSCREEN_STOP_RECORDING" });
 
@@ -157,18 +213,13 @@ async function finalizeRecording(result: OffscreenRecordingResult) {
     shareUrl,
   };
 
-  if (recordingState.activeTabId) {
-    await browser.tabs
-      .sendMessage(recordingState.activeTabId, { type: "HIDE_CAMERA_PREVIEW" })
-      .catch(() => undefined);
-  }
-
   await updateRecordingState({
     status: "idle",
     startedAt: null,
     activeTabId: null,
     options: null,
     lastError: null,
+    lastWarning: null,
     lastRecording: completeRecording,
   });
 
@@ -176,47 +227,16 @@ async function finalizeRecording(result: OffscreenRecordingResult) {
 }
 
 async function failRecording(message: string) {
-  if (recordingState.activeTabId) {
-    await browser.tabs
-      .sendMessage(recordingState.activeTabId, { type: "HIDE_CAMERA_PREVIEW" })
-      .catch(() => undefined);
-  }
-
   await updateRecordingState({
     status: "error",
     startedAt: null,
     activeTabId: null,
     options: null,
     lastError: message,
+    lastWarning: null,
   });
 
   return recordingState;
-}
-
-async function chooseDesktopStream(
-  activeTab: chrome.tabs.Tab,
-  options: StartRecordingOptions,
-) {
-  const sources = [options.target === "window" ? "window" : "screen"] as string[];
-
-  if (options.systemAudioEnabled) {
-    sources.push("audio");
-  }
-
-  return await new Promise<string>((resolve, reject) => {
-    chrome.desktopCapture.chooseDesktopMedia(
-      sources as unknown as chrome.desktopCapture.DesktopCaptureSourceType[],
-      activeTab,
-      (streamId) => {
-      if (!streamId) {
-        reject(new Error("Screen selection was cancelled."));
-        return;
-      }
-
-      resolve(streamId);
-      },
-    );
-  });
 }
 
 async function ensureOffscreenDocument() {
@@ -233,8 +253,10 @@ async function ensureOffscreenDocument() {
   await chrome.offscreen.createDocument({
     url: OFFSCREEN_DOCUMENT_PATH,
     reasons: [chrome.offscreen.Reason.USER_MEDIA],
-    justification: "Capture display, camera, and microphone in a persistent context.",
+    justification: "Capture tab video, camera, and microphone in a persistent context.",
   });
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
 }
 
 async function updateRecordingState(partialState: Partial<RecordingState>) {
@@ -267,5 +289,22 @@ async function broadcastRecordingState() {
 }
 
 async function sendRuntimeMessage<Response>(message: RuntimeMessage) {
-  return (await browser.runtime.sendMessage(message)) as RuntimeResponse<Response>;
+  return await new Promise<RuntimeResponse<Response>>((resolve, reject) => {
+    chrome.runtime.sendMessage(message, (response) => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(`Runtime message failed: ${chrome.runtime.lastError.message}`));
+        return;
+      }
+
+      resolve(response as RuntimeResponse<Response>);
+    });
+  });
+}
+
+async function setRecordingWarning(message: string) {
+  await updateRecordingState({
+    lastWarning: message,
+  });
+
+  return recordingState;
 }

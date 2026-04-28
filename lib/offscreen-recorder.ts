@@ -1,9 +1,10 @@
 import { saveRecordingAsset } from "./recording-db";
 import type {
   OffscreenRecordingResult,
+  PipCorner,
+  PreparedRecordingOptions,
   RuntimeMessage,
   RuntimeResponse,
-  StartRecordingOptions,
 } from "./recording";
 
 type ActiveRecordingSession = {
@@ -12,13 +13,15 @@ type ActiveRecordingSession = {
   displayStream: MediaStream;
   micStream: MediaStream | null;
   cameraStream: MediaStream | null;
+  monitorAudioContext: AudioContext | null;
   displayVideo: HTMLVideoElement;
   cameraVideo: HTMLVideoElement | null;
-  canvas: HTMLCanvasElement;
-  animationFrameId: number | null;
+  canvas: HTMLCanvasElement | null;
+  renderIntervalId: number | null;
   audioContext: AudioContext | null;
   recorder: MediaRecorder;
   startedAt: number;
+  options: PreparedRecordingOptions;
 };
 
 let activeSession: ActiveRecordingSession | null = null;
@@ -53,66 +56,113 @@ browser.runtime.onMessage.addListener((message: RuntimeMessage, _sender, sendRes
   return false;
 });
 
-async function startRecording(options: StartRecordingOptions & { streamId: string }) {
+async function startRecording(options: PreparedRecordingOptions) {
   if (activeSession) {
     throw new Error("A recording session is already active.");
   }
 
-  const displayStream = await getDisplayStream(options);
-  const micStream = options.micEnabled
-    ? await navigator.mediaDevices.getUserMedia({
+  let displayStream: MediaStream | null = null;
+  let micStream: MediaStream | null = null;
+  let cameraStream: MediaStream | null = null;
+  const warnings: string[] = [];
+
+  try {
+    displayStream = await getDisplayStream(options);
+  } catch (error) {
+    stopMediaStream(displayStream);
+    stopMediaStream(micStream);
+    stopMediaStream(cameraStream);
+
+    throw new Error(getErrorMessage(error));
+  }
+
+  if (options.micEnabled) {
+    try {
+      micStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: true,
           noiseSuppression: true,
         },
         video: false,
-      })
-    : null;
+      });
+    } catch (error) {
+      warnings.push(`Microphone unavailable: ${getErrorMessage(error)}`);
+    }
+  }
 
-  const cameraStream = options.cameraEnabled
-    ? await navigator.mediaDevices.getUserMedia({
+  if (options.cameraEnabled) {
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({
         video: {
           width: { ideal: 640 },
           height: { ideal: 360 },
           frameRate: { ideal: 30, max: 30 },
         },
         audio: false,
-      })
-    : null;
+      });
+    } catch (error) {
+      warnings.push(`Camera unavailable: ${getErrorMessage(error)}`);
+    }
+  }
 
   const displayVideo = await createVideoElement(displayStream);
   const cameraVideo = cameraStream ? await createVideoElement(cameraStream) : null;
-
-  const canvas = document.createElement("canvas");
-  const displayTrackSettings = displayStream.getVideoTracks()[0]?.getSettings();
-  canvas.width = displayTrackSettings.width ?? 1280;
-  canvas.height = displayTrackSettings.height ?? 720;
+  const monitorAudioContext = await createAudioMonitor(displayStream, options.tabAudioEnabled);
 
   const { audioContext, audioTracks } = await mixAudioTracks(displayStream, micStream);
-  const canvasStream = canvas.captureStream(30);
-  const composedStream = new MediaStream([
-    ...canvasStream.getVideoTracks(),
-    ...audioTracks,
-  ]);
+  const useCanvasComposition = Boolean(cameraVideo);
+  let canvas: HTMLCanvasElement | null = null;
+  let renderIntervalId: number | null = null;
+  let videoTracks: MediaStreamTrack[];
 
-  const recorder = new MediaRecorder(composedStream, { mimeType: getSupportedMimeType() });
+  if (useCanvasComposition) {
+    canvas = document.createElement("canvas");
+    const displayTrackSettings = displayStream.getVideoTracks()[0]?.getSettings();
+    canvas.width = displayTrackSettings.width ?? 1280;
+    canvas.height = displayTrackSettings.height ?? 720;
+
+    const previewSession = {
+      displayVideo,
+      cameraVideo,
+      canvas,
+      options,
+    };
+
+    renderFrame(previewSession);
+    renderIntervalId = window.setInterval(() => {
+      renderFrame(previewSession);
+    }, 1000 / options.frameRate);
+
+    videoTracks = canvas.captureStream(options.frameRate).getVideoTracks();
+  } else {
+    videoTracks = displayStream.getVideoTracks();
+  }
+
+  const composedStream = new MediaStream([...videoTracks, ...audioTracks]);
+
+  const recorder = new MediaRecorder(composedStream, {
+    mimeType: getSupportedMimeType(),
+    videoBitsPerSecond: options.videoBitsPerSecond,
+    audioBitsPerSecond: options.audioBitsPerSecond,
+  });
   const session: ActiveRecordingSession = {
     chunks: [],
     composedStream,
     displayStream,
     micStream,
     cameraStream,
+    monitorAudioContext,
     displayVideo,
     cameraVideo,
     canvas,
-    animationFrameId: null,
+    renderIntervalId,
     audioContext,
     recorder,
     startedAt: Date.now(),
+    options,
   };
 
   activeSession = session;
-  session.animationFrameId = window.requestAnimationFrame(() => drawFrame(session));
 
   displayStream.getVideoTracks()[0]?.addEventListener("ended", () => {
     if (activeSession) {
@@ -133,7 +183,14 @@ async function startRecording(options: StartRecordingOptions & { streamId: strin
     } satisfies RuntimeMessage);
   };
 
-  recorder.start(1000);
+  recorder.start(500);
+
+  if (warnings.length > 0) {
+    await chrome.runtime.sendMessage({
+      type: "OFFSCREEN_RECORDING_WARNING",
+      payload: { message: warnings.join(" ") },
+    } satisfies RuntimeMessage);
+  }
 }
 
 async function stopRecording() {
@@ -152,6 +209,14 @@ async function stopRecording() {
       void finalizeSession(session).then(resolve).catch(reject);
     };
 
+    if (session.recorder.state === "recording") {
+      try {
+        session.recorder.requestData();
+      } catch {
+        // Ignore flush failures and continue stopping.
+      }
+    }
+
     session.recorder.stop();
   });
 }
@@ -159,6 +224,13 @@ async function stopRecording() {
 async function finalizeSession(session: ActiveRecordingSession) {
   const mimeType = session.recorder.mimeType || "video/webm";
   const blob = new Blob(session.chunks, { type: mimeType });
+
+  if (blob.size === 0) {
+    cleanupSession(session);
+    activeSession = null;
+    throw new Error("Recording completed without media data.");
+  }
+
   const result: OffscreenRecordingResult = {
     id: crypto.randomUUID(),
     createdAt: Date.now(),
@@ -183,37 +255,49 @@ async function finalizeSession(session: ActiveRecordingSession) {
 }
 
 function cleanupSession(session: ActiveRecordingSession) {
-  if (session.animationFrameId !== null) {
-    window.cancelAnimationFrame(session.animationFrameId);
+  if (session.renderIntervalId !== null) {
+    window.clearInterval(session.renderIntervalId);
   }
 
   session.composedStream.getTracks().forEach((track) => track.stop());
   session.displayStream.getTracks().forEach((track) => track.stop());
   session.micStream?.getTracks().forEach((track) => track.stop());
   session.cameraStream?.getTracks().forEach((track) => track.stop());
+  if (session.monitorAudioContext && session.monitorAudioContext.state !== "closed") {
+    void session.monitorAudioContext.close();
+  }
 
   if (session.audioContext && session.audioContext.state !== "closed") {
     void session.audioContext.close();
   }
 }
 
-async function getDisplayStream(options: StartRecordingOptions & { streamId: string }) {
-  const source = options.target === "tab" ? "tab" : "desktop";
+async function getDisplayStream(options: PreparedRecordingOptions) {
+  try {
+    return await requestDisplayStream(options.streamId, options.tabAudioEnabled);
+  } catch (error) {
+    const message = getErrorMessage(error);
+    throw new Error(`Unable to capture tab: ${message}`);
+  }
+}
 
-  const audio = options.systemAudioEnabled
+async function requestDisplayStream(
+  streamId: string,
+  includeAudio: boolean,
+) {
+  const audio = includeAudio
     ? {
         mandatory: {
-          chromeMediaSource: source,
-          chromeMediaSourceId: options.streamId,
+          chromeMediaSource: "tab",
+          chromeMediaSourceId: streamId,
         },
       }
     : false;
 
   const video = {
     mandatory: {
-      chromeMediaSource: source,
-      chromeMediaSourceId: options.streamId,
-      maxFrameRate: 30,
+      chromeMediaSource: "tab",
+      chromeMediaSourceId: streamId,
     },
   };
 
@@ -237,6 +321,27 @@ async function createVideoElement(stream: MediaStream) {
   });
 
   return video;
+}
+
+async function createAudioMonitor(stream: MediaStream, enabled: boolean) {
+  if (!enabled || stream.getAudioTracks().length === 0) {
+    return null;
+  }
+
+  const audioContext = new AudioContext();
+  const source = audioContext.createMediaStreamSource(new MediaStream(stream.getAudioTracks()));
+  source.connect(audioContext.destination);
+
+  try {
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+
+    return audioContext;
+  } catch {
+    await audioContext.close().catch(() => undefined);
+    return null;
+  }
 }
 
 async function mixAudioTracks(displayStream: MediaStream, micStream: MediaStream | null) {
@@ -264,7 +369,12 @@ async function mixAudioTracks(displayStream: MediaStream, micStream: MediaStream
   };
 }
 
-function drawFrame(session: ActiveRecordingSession) {
+function renderFrame(session: {
+  displayVideo: HTMLVideoElement;
+  cameraVideo: HTMLVideoElement | null;
+  canvas: HTMLCanvasElement;
+  options: PreparedRecordingOptions;
+}) {
   const context = session.canvas.getContext("2d");
 
   if (!context) {
@@ -278,8 +388,13 @@ function drawFrame(session: ActiveRecordingSession) {
   if (session.cameraVideo) {
     const insetWidth = Math.max(220, Math.floor(width * 0.18));
     const insetHeight = Math.floor(insetWidth * 0.62);
-    const insetX = width - insetWidth - 28;
-    const insetY = height - insetHeight - 28;
+    const { x: insetX, y: insetY } = getPipPosition(
+      session.options.pipCorner,
+      width,
+      height,
+      insetWidth,
+      insetHeight,
+    );
     const radius = 22;
 
     context.save();
@@ -301,8 +416,6 @@ function drawFrame(session: ActiveRecordingSession) {
     context.arc(insetX + 18, insetY + 18, 6, 0, Math.PI * 2);
     context.fill();
   }
-
-  session.animationFrameId = window.requestAnimationFrame(() => drawFrame(session));
 }
 
 function drawRoundedRect(
@@ -335,4 +448,34 @@ function getSupportedMimeType() {
 
   const match = preferredMimeTypes.find((mimeType) => MediaRecorder.isTypeSupported(mimeType));
   return match ?? "video/webm";
+}
+
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unexpected recording error.";
+}
+
+function stopMediaStream(stream: MediaStream | null) {
+  stream?.getTracks().forEach((track) => track.stop());
+}
+
+function getPipPosition(
+  corner: PipCorner,
+  canvasWidth: number,
+  canvasHeight: number,
+  pipWidth: number,
+  pipHeight: number,
+) {
+  const inset = 28;
+
+  switch (corner) {
+    case "top-left":
+      return { x: inset, y: inset };
+    case "bottom-left":
+      return { x: inset, y: canvasHeight - pipHeight - inset };
+    case "bottom-right":
+      return { x: canvasWidth - pipWidth - inset, y: canvasHeight - pipHeight - inset };
+    case "top-right":
+    default:
+      return { x: canvasWidth - pipWidth - inset, y: inset };
+  }
 }
