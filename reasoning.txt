@@ -1,0 +1,16 @@
+1. Framework & Setup
+- WXT, React and Tailwind CSS. WXT handles the MV3 and bundling.
+
+2. Architecture
+- Using chrome.tabCapture.getMediaStreamId() to hook onto the current tab.
+- This must be called from the background service worker as chrome enforces a strict tab restriction, so generating the stream ID from the popup blocks an offscreen document from consuming it (used to actually record the media).
+
+3. Media Recording
+- The offscreen HTML spins up a hidden Canvas.
+- We pull in the tab video, tab audio, microphone, and camera streams.
+- The camera stream is drawn onto a specific corner of the canvas to composite the PIP overlay.
+- We run a MediaRecorder on the composed canvas stream to generate the .webm blobs.
+
+4. Fixing the Permissions Issue
+Chrome extensions can't prompt for camera/mic permissions from popup or background worker.
+- Route the user to a dedicated setup page hosted under the extension origin, giving permission to the full-page context grants the origin permanent access to the user's hardware.
